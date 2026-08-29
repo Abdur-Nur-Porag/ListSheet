@@ -1,6 +1,16 @@
-# ListSheet Plugin Documentation
+# ListSheet
+**ListSheet** turns your everyday markdown lists into a live, calculating spreadsheet. Write a simple `label = expression` line and get instant sums, budgets, checklists, and formula results — right inside your notes, with full Bangla/Bengali support built in.
 
-**ListSheet** is an Obsidian plugin. It reads your markdown lists and lets you run calculations on them using simple formulas.
+## ✨ Why People Love It
+
+- 🧮 **Real formulas, not just totals** — `Sum`, `Avg`, `Min`, `Max`, `Count`, `Mid`, `First`, `Last`, plus math functions (`sin`, `cos`, `sqrt`, `LCM`, `GCD`) and full operators (`+ - * / % ^`)
+- ✅ **Checkbox-aware calculations** — `totalCheck()`, `totalUnCheck()`, and name lookups only count what's actually ticked
+- 🔀 **Conditional logic** — `If(condition, true, false)` with `== != and or not`, including nested conditions for grading, alerts, and status checks
+- 🎯 **One-shot dot notation** — grab a single value instantly with `ParentName.ChildName`, no separate lookup needed
+- 🌐 **Bangla/Bengali native** — Bengali digits, currency, and labels are recognized automatically, no extra setup
+- 🔤 **Text + numbers together** — combine strings and values in one formula, e.g. `"Total: " + Sum(Budget)`
+- 🔒 **Safe by design** — a purpose-built formula engine (no raw code execution) keeps your notes secure
+- 📋 **Live everywhere** — results update inline as you type, plus a dedicated side panel with one-click JSON export
 
 ## Release
 ### V1.0.0

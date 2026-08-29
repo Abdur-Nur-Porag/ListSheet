@@ -3,7 +3,7 @@
   "name": "ListSheet",
   "version": "1.0.0",
   "minAppVersion": "0.15.0",
-  "description": "Perform calculations on nested or simple task lists using sum, average, and math expressions.",
+  "description": "Turn markdown lists into a live spreadsheet — instant sums, budgets, checklists, and calculator-style formulas (math, conditions, sin/sqrt) with full Bangla/Bengali support.",
   "author": "Abdur Nur Porag",
   "authorUrl": "https://github.com/Abdur-Nur-Porag",
   "isDesktopOnly": false
