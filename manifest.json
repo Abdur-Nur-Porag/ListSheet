@@ -1,7 +1,7 @@
 {
   "id": "listsheet",
   "name": "ListSheet",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "minAppVersion": "0.15.0",
   "description": "Turn markdown lists into a live spreadsheet — instant sums, budgets, checklists, and calculator-style formulas (math, conditions, sin/sqrt) with full Bangla/Bengali support.",
   "author": "Abdur Nur Porag",

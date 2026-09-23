@@ -710,11 +710,22 @@ function buildListObj(blocks, duplicateKeyMode = 'merge') {
    ║                                                                ║
    ║  Line syntax : <name> = <expr>                                ║
    ║  Aggregates  : Sum() Avg() First() Last() Mid() Min() Max()   ║
-   ║                Count()          — argument is a top-level     ║
-   ║                                    listObj key                ║
+   ║                Count()          — argument is a top-level key ║
+   ║                                    OR a dot path to a nested  ║
+   ║                                    item:  Sum(Trip.Food)      ║
+   ║                                    (RECURSIVE through every   ║
+   ║                                    accessible descendant)     ║
    ║  Dot access  : Obj.Child        — a single child's own value  ║
+   ║                Obj.Child.Grand — any depth, gated at each step║
    ║  Arithmetic  : + - * / x ÷ % ^  plus sin/cos/tan/log/sqrt/…   ║
    ║                (delegated to evalMath, defined above)         ║
+   ║                                                                ║
+   ║  CHECKBOX GATE (applies to EVERY operation, at EVERY depth):  ║
+   ║    · item is a checkbox  → CHECKED   : its inside is open     ║
+   ║                            UNCHECKED : its own value and its  ║
+   ║                            whole subtree are hidden           ║
+   ║    · item is bullet/num  → always open, but each of ITS       ║
+   ║                            children is gated again            ║
    ╚══════════════════════════════════════════════════════════════╝ */
 
 const AGG_FN_NAMES = ['Sum', 'Avg', 'First', 'Last', 'Mid', 'Min', 'Max', 'Count'];
@@ -744,56 +755,69 @@ function parseFormulaLine(line) {
 }
 
 /**
- * Decide whether a child item counts toward a calculation, given
- * checkbox state.
+ * THE GATE — asked about EVERY item, at EVERY depth, before anything
+ * inside it may be touched.
  *
- * Rule (per user spec):
- *  · Non-checkbox items (bullet, number) always count.
- *  · Checkbox items only count if THEY are checked…
- *  · …UNLESS the parent obj itself is a checkbox that is checked, in
- *    which case every child counts regardless of its own checked state
- *    ("parent checked means all checked").
+ *  · checkbox  → open only when it is checked.
+ *  · bullet / number (anything else) → always open.
+ *
+ * A closed item hides its own value AND its whole subtree, whatever the
+ * types of the things inside it (bullet / number / another checkbox).
  */
-function isIncludedForCalc(child, parentIsCheckedList) {
-  if (child.type !== 'checkbox') return true;
-  if (parentIsCheckedList) return true;
-  return child.isChecked === true;
+function isAccessible(node) {
+  return !!node && (node.type !== 'checkbox' || node.isChecked === true);
 }
 
 /**
- * Compute one of the aggregate functions over a listObj node's children.
- * `node` is a top-level (or dot-addressed) entry: { value, child:[...] }.
- * "Own value" (per spec) is folded into Sum/Avg alongside the children.
+ * Recursively collect every item reachable below `root`, in document
+ * (pre-order) sequence, applying the gate at each step:
  *
- * `type: 'calc'` children (rows injected by an earlier ```listsheet
- * formula, e.g. when a formula's section heading happens to match a data
- * list's own name) are always excluded — otherwise a later Sum()/Count()
- * over the same key would double-count previously computed results.
+ *   root closed?            → nothing is reachable at all
+ *   child is a checkbox     → unchecked: skip it and its whole subtree
+ *                             checked  : keep it, then look inside it
+ *   child is bullet/number  → keep it, then look inside it
+ *                             (each of ITS children is gated again)
  *
- * Checkbox filtering: see isIncludedForCalc(). Applies to every function
- * here (Sum/Avg/First/Last/Mid/Min/Max/Count), and to the node's own
- * value too — an unchecked checkbox item's own value doesn't count
- * unless the checkbox is itself checked.
+ * `type:'calc'` rows (results injected by earlier ```listsheet formulas)
+ * are never collected, so a later Sum()/Count() can't double-count them.
+ *
+ * @returns {{ open:boolean, items:Array }}  `open` = root itself passed
+ *          the gate (so its own value may be used).
+ */
+function collectAccessible(root) {
+  const open  = isAccessible(root);
+  const items = [];
+  if (!open) return { open, items };
+
+  const walk = parent => {
+    for (const child of parent.child || []) {
+      if (child.type === 'calc') continue;
+      if (!isAccessible(child)) continue;   // closed → prune this whole branch
+      items.push(child);
+      walk(child);                          // open  → gate its children too
+    }
+  };
+  walk(root);
+  return { open, items };
+}
+
+/**
+ * Aggregate over a listObj node, RECURSIVELY through every accessible
+ * descendant (see collectAccessible). The node's own value is included
+ * in Sum/Avg when the node passes the gate.
+ *
+ *   Sum / Avg / Min / Max  → over every accessible item that has a number
+ *   First / Last / Mid     → over those numeric items, in document order
+ *   Count                  → number of accessible items (any kind)
  */
 function aggregate(fnName, node) {
   if (!node) return null;
 
-  /* "parent checked → all children count" only applies when the obj
-     being aggregated is itself a checked checkbox item. */
-  const parentIsCheckedList = node.type === 'checkbox' && node.isChecked === true;
+  const { open, items } = collectAccessible(node);
+  const isNum = v => typeof v === 'number' && isFinite(v);
 
-  const children = (node.child || [])
-    .filter(c => c.type !== 'calc')
-    .filter(c => isIncludedForCalc(c, parentIsCheckedList));
-
-  const numericVals = children
-    .map(c => c.value)
-    .filter(v => typeof v === 'number' && isFinite(v));
-
-  const ownIncluded = node.type !== 'checkbox' || node.isChecked === true;
-  const ownVal = (ownIncluded && typeof node.value === 'number' && isFinite(node.value))
-    ? node.value
-    : null;
+  const numericVals = items.map(c => c.value).filter(isNum);
+  const ownVal      = open && isNum(node.value) ? node.value : null;
 
   switch (fnName.toLowerCase()) {
     case 'sum':
@@ -806,37 +830,29 @@ function aggregate(fnName, node) {
     }
 
     case 'first':
-      return children.length ? children[0].value : null;
+      return numericVals.length ? numericVals[0] : null;
 
     case 'last':
-      return children.length ? children[children.length - 1].value : null;
+      return numericVals.length ? numericVals[numericVals.length - 1] : null;
 
     case 'mid': {
-      /* Works cleanly for an even child count (average of the two middle
-         items, in document order). For an odd count the spec calls for a
-         different formula entirely — we fall back to the exact middle
-         element and flag it, rather than silently guessing. */
-      const n = children.length;
+      /* even count → average of the two middle values (document order).
+         odd count  → exact middle value (flagged in debug). */
+      const n = numericVals.length;
       if (n === 0) return null;
-      if (n % 2 === 0) {
-        const a = children[n / 2 - 1].value;
-        const b = children[n / 2].value;
-        if (typeof a !== 'number' || typeof b !== 'number') return null;
-        return (a + b) / 2;
-      }
+      if (n % 2 === 0) return (numericVals[n / 2 - 1] + numericVals[n / 2]) / 2;
       debug.warn('aggregate', `Mid() called on odd-count obj (n=${n}) — returning the exact middle element`);
-      const midVal = children[Math.floor(n / 2)].value;
-      return typeof midVal === 'number' ? midVal : null;
+      return numericVals[Math.floor(n / 2)];
     }
 
     case 'min':
-      return numericVals.length ? Math.min(...numericVals) : null;
+      return numericVals.length ? numericVals.reduce((a, b) => (b < a ? b : a)) : null;
 
     case 'max':
-      return numericVals.length ? Math.max(...numericVals) : null;
+      return numericVals.length ? numericVals.reduce((a, b) => (b > a ? b : a)) : null;
 
     case 'count':
-      return children.length;
+      return items.length;
 
     default:
       return null;
@@ -844,30 +860,43 @@ function aggregate(fnName, node) {
 }
 
 /**
- * Count checked/unchecked checkbox items belonging to a listObj node —
- * used by totalCheck()/totalUnCheck(). Includes the node's own checked
- * state (when the node itself is a checkbox with children) alongside its
- * checkbox children, and always excludes `type:'calc'` rows.
+ * Every checkbox reachable from `root` (root included when it is one),
+ * in document order, gated at each depth.
+ *
+ * An UNCHECKED checkbox is still reported (you can see that it is
+ * unchecked — that's what totalUnCheck()/unCheckItemName() need), but it
+ * is never opened, so nothing inside it is reachable.
+ * Bullets/numbers are transparent: we look inside them, and gate each of
+ * their children again.
  */
-function countCheckState(node, wantChecked) {
-  if (!node) return null;
-  const kids = (node.child || []).filter(c => c.type === 'checkbox');
-  let count = kids.filter(c => c.isChecked === wantChecked).length;
-  if (node.type === 'checkbox' && node.isChecked === wantChecked) count++;
-  return count;
+function collectCheckboxes(root) {
+  const found = [];
+  const visit = node => {
+    if (node.type === 'checkbox') {
+      found.push(node);
+      if (node.isChecked !== true) return;   // closed → do not go inside
+    }
+    for (const c of node.child || []) {
+      if (c.type === 'calc') continue;
+      visit(c);
+    }
+  };
+  if (root) visit(root);
+  return found;
 }
 
-/**
- * Collect the labels of checked/unchecked checkbox items belonging to a
- * listObj node — used by checkItemName()/unCheckItemName().
- */
+/** totalCheck() / totalUnCheck() — recursive, gated. */
+function countCheckState(node, wantChecked) {
+  if (!node) return null;
+  return collectCheckboxes(node).filter(n => (n.isChecked === true) === wantChecked).length;
+}
+
+/** checkItemName() / unCheckItemName() — recursive, gated. */
 function collectCheckItemNames(node, wantChecked) {
   if (!node) return null;
-  const names = (node.child || [])
-    .filter(c => c.type === 'checkbox' && c.isChecked === wantChecked)
-    .map(c => c.label);
-  if (node.type === 'checkbox' && node.isChecked === wantChecked) names.unshift(node.label);
-  return names;
+  return collectCheckboxes(node)
+    .filter(n => (n.isChecked === true) === wantChecked)
+    .map(n => n.label);
 }
 
 /** Human-readable "not found" error, shared by every resolution path. */
@@ -949,7 +978,7 @@ const _MATH_FN_MAP = {
    ╚══════════════════════════════════════════════════════════════╝ */
 /* IDENT allows any Unicode letter (\p{L}) plus combining marks (\p{M}) in
  * the continuation position — not just A-Za-z0-9 — so bare identifiers and
- * dot-notation (see prepassDotRefs) can reference Bengali-named — or any
+ * dot-notation (see resolveDotRef) can reference Bengali-named — or any
  * non-Latin-named — lists/sections. \p{M} matters because Indic scripts
  * commonly spell a "letter" as a base consonant plus a separate combining
  * vowel-sign codepoint (matra) that Unicode classifies as a Mark, not a
@@ -1228,7 +1257,11 @@ class FormulaParser {
       return FR_ERROR(itemNotFoundMsg(name));
     }
     if (listObj[name]) {
-      const val = listObj[name].value;
+      const node = listObj[name];
+      /* CHECKBOX GATE: a bare name means "this object's own value" — if
+         the object is an unchecked checkbox, that value is not accessible. */
+      if (!isAccessible(node)) return FR(0);
+      const val = node.value;
       if (typeof val === 'number' && isFinite(val)) return FR(val);
       if (typeof val === 'string') return FR(val, null, true);
       /* the object exists but has no usable own value (e.g. a section with
@@ -1239,66 +1272,127 @@ class FormulaParser {
   }
 }
 
-/**
- * Pre-pass: resolve every Sum()/Avg()/…/totalCheck()/checkItemName() call
- * (raw-identifier-argument functions) into literal numbers/strings before
- * tokenizing the rest of the expression. Pushes onto `errors` the moment a
- * referenced object name doesn't exist in listObj at all.
- */
-function prepassRawArgFns(expr, listObj, errors) {
-  return expr.replace(RAW_ARG_FN_RE, (full, fnName, argRaw) => {
-    const argName = argRaw.trim();
-    const node = listObj[argName];
-    if (!node) {
-      errors.push(itemNotFoundMsg(argName));
-      return '0';
-    }
-    const lower = fnName.toLowerCase();
-
-    if (lower === 'totalcheck' || lower === 'totaluncheck') {
-      const n = countCheckState(node, lower === 'totalcheck');
-      return String(n ?? 0);
-    }
-    if (lower === 'checkitemname' || lower === 'uncheckitemname') {
-      const names = collectCheckItemNames(node, lower === 'checkitemname') || [];
-      return `"${escapeForLiteral(names.join(', '))}"`;
-    }
-
-    const v = aggregate(fnName, node);
-    return String(v == null ? 0 : v);
-  });
-}
-
-/* Same Unicode-letter+mark identifier shape as TOKEN_RE (see its comment
+/* Dot path: Name.Child  or a deeper one  Name.Child.Grandchild…
+ * Same Unicode-letter+mark identifier shape as TOKEN_RE (see its comment
  * for why \p{M} is required for Indic scripts). \b can't be used here
  * since it's defined in terms of ASCII \w and doesn't create a boundary
- * around non-Latin letters (e.g. Bengali) — so a plain \b-based version of
- * this pattern silently never matched dot-refs like "টাকা.খরচ", even
- * though Sum()/Avg() already supported Bengali names via their own
- * unrestricted raw-argument regex. Lookarounds against the identifier
- * character class itself give the same "isolated word" guarantee without
- * relying on \w. */
-const _DOT_REF_RE = /(?<![\p{L}\p{N}\p{M}_])([\p{L}_][\p{L}\p{N}\p{M}_]*)\.([\p{L}_][\p{L}\p{N}\p{M}_]*)(?![\p{L}\p{N}\p{M}_])/gu;
+ * around non-Latin letters (e.g. Bengali) — so lookarounds against the
+ * identifier character class itself give the same "isolated word"
+ * guarantee without relying on \w. The extra "." in the look-behind stops
+ * a match starting in the middle of a path or right after a decimal point. */
+const _DOT_REF_RE = /(?<![\p{L}\p{N}\p{M}_.])([\p{L}_][\p{L}\p{N}\p{M}_]*(?:\.[\p{L}_][\p{L}\p{N}\p{M}_]*)+)(?![\p{L}\p{N}\p{M}_])/gu;
+
+/* ONE combined pass over the expression: function calls  Sum(...) /
+ * totalCheck(...) / …  OR  dot references  A.B.C.
+ * The regex engine scans left-to-right and each match is consumed whole,
+ * so  Sum(Trip.Food)  is matched as ONE function call (its path argument
+ * is looked up as an item, not replaced by a number first), while a
+ * standalone  Trip.Fuel  is matched as a dot reference. Replaced text is
+ * never re-scanned, so text results (e.g. "Mr.Smith" from
+ * checkItemName()) can never be mistaken for a path.
+ * Groups: 1 = function name, 2 = its raw argument, 3 = dot path. */
+const _REF_RE = new RegExp(`${RAW_ARG_FN_RE.source}|${_DOT_REF_RE.source}`, 'giu');
+
+/* Stand-in for "a closed checkbox with nothing reachable inside" — used
+ * when an ancestor of the requested item is unchecked. */
+const _CLOSED_STUB = Object.freeze({ type: 'checkbox', isChecked: false, value: null, child: [] });
 
 /**
- * Pre-pass: resolve every Obj.Child dot reference into a literal
- * number/string before tokenizing. Pushes onto `errors` the moment the
- * parent object or the named child doesn't exist.
+ * FIND an item by path:  ['Trip','Food','Dinner']  →  Trip → Food → Dinner.
+ * Every step FINDS the child by its label (direct children only), and the
+ * checkbox gate is asked at every step:
+ *
+ *   · `error` is set when a name doesn't exist (even behind an unchecked
+ *     checkbox, so typos never hide);
+ *   · `open`  is false when any ANCESTOR on the way is an unchecked
+ *     checkbox — the found item is then not reachable. (The found item's
+ *     OWN checkbox state is not included here; callers apply the gate to
+ *     it themselves, e.g. aggregate() / isAccessible().)
+ *
+ * @returns {{ node?:Object, open?:boolean, error?:string }}
  */
-function prepassDotRefs(expr, listObj, errors) {
-  return expr.replace(_DOT_REF_RE, (full, objName, childName) => {
-    const node = listObj[objName];
-    if (!node) { errors.push(itemNotFoundMsg(objName)); return '0'; }
+function resolveItemPath(listObj, segments) {
+  const rootName = segments[0];
+  let node = Object.prototype.hasOwnProperty.call(listObj, rootName) ? listObj[rootName] : null;
+  if (!node) return { error: itemNotFoundMsg(rootName) };
 
-    const parentIsCheckedList = node.type === 'checkbox' && node.isChecked === true;
-    const child = (node.child || []).find(c => c.label === childName && c.type !== 'calc');
-    if (!child) { errors.push(itemNotFoundMsg(`${objName}.${childName}`)); return '0'; }
-    if (!isIncludedForCalc(child, parentIsCheckedList)) return '0';
+  let open = true;
+  for (let i = 1; i < segments.length; i++) {
+    if (!isAccessible(node)) open = false;   // gate BEFORE looking inside `node`
 
-    const v = child.value;
-    if (typeof v === 'number' && isFinite(v)) return String(v);
-    if (typeof v === 'string') return `"${escapeForLiteral(v)}"`;
-    return '0';
+    const child = (node.child || []).find(c => c.type !== 'calc' && c.label === segments[i]);
+    if (!child) return { error: itemNotFoundMsg(segments.slice(0, i + 1).join('.')) };
+    node = child;
+  }
+  return { node, open };
+}
+
+/**
+ * Sum()/Avg()/…/totalCheck()/checkItemName() → literal number/string.
+ * The argument is a top-level listObj key OR a dot path to a nested item
+ * (e.g. Sum(Trip.Food)). The item is FOUND first, then the function is
+ * applied to it — aggregate() / countCheckState() / collectCheckItemNames()
+ * walk its descendants recursively with the checkbox gate at every level.
+ */
+function resolveRawArgCall(fnName, argRaw, listObj, errors) {
+  const argName = argRaw.trim();
+  const lower   = fnName.toLowerCase();
+
+  let node, open = true;
+  if (Object.prototype.hasOwnProperty.call(listObj, argName)) {
+    node = listObj[argName];                       // exact top-level key wins (keys may contain ".")
+  } else {
+    const r = resolveItemPath(listObj, argName.split('.').map(s => s.trim()));
+    if (r.error) { errors.push(r.error); return '0'; }
+    node = r.node;
+    open = r.open;
+  }
+
+  /* an ancestor checkbox is unchecked → nothing in here is reachable */
+  if (!open) {
+    if (lower === 'totalcheck' || lower === 'totaluncheck') return '0';
+    if (lower === 'checkitemname' || lower === 'uncheckitemname') return '""';
+    return String(aggregate(fnName, _CLOSED_STUB) ?? 0);
+  }
+
+  if (lower === 'totalcheck' || lower === 'totaluncheck') {
+    const n = countCheckState(node, lower === 'totalcheck');
+    return String(n ?? 0);
+  }
+  if (lower === 'checkitemname' || lower === 'uncheckitemname') {
+    const names = collectCheckItemNames(node, lower === 'checkitemname') || [];
+    return `"${escapeForLiteral(names.join(', '))}"`;
+  }
+
+  const v = aggregate(fnName, node);
+  return String(v == null ? 0 : v);
+}
+
+/**
+ * Obj.Child[.Grandchild…] → the item's own value as a literal.
+ * A name that doesn't exist is an error; an item that exists but is
+ * unchecked, or sits behind an unchecked checkbox, gives 0.
+ */
+function resolveDotRef(fullPath, listObj, errors) {
+  const r = resolveItemPath(listObj, fullPath.split('.'));
+  if (r.error) { errors.push(r.error); return '0'; }
+  if (!r.open || !isAccessible(r.node)) return '0';
+
+  const v = r.node.value;
+  if (typeof v === 'number' && isFinite(v)) return String(v);
+  if (typeof v === 'string') return `"${escapeForLiteral(v)}"`;
+  return '0';
+}
+
+/**
+ * Pre-pass: resolve every function call and dot reference into a literal
+ * number/string before tokenizing the rest of the expression. Pushes onto
+ * `errors` the moment a referenced name/path doesn't exist.
+ */
+function prepassReferences(expr, listObj, errors) {
+  return expr.replace(_REF_RE, (full, fnName, argRaw, dotPath) => {
+    if (fnName !== undefined) return resolveRawArgCall(fnName, argRaw, listObj, errors);
+    return resolveDotRef(dotPath, listObj, errors);
   });
 }
 
@@ -1312,11 +1406,10 @@ function evaluateFormula(expr, listObj, scope) {
   const errors = [];
   let e = expr;
 
-  /* 1) Obj.Child dot notation → literals */
-  e = prepassDotRefs(e, listObj, errors);
-
-  /* 2) Sum()/Avg()/…/totalCheck()/checkItemName() → literals */
-  e = prepassRawArgFns(e, listObj, errors);
+  /* 1) Sum()/Avg()/…/totalCheck()/checkItemName() calls (top-level key OR
+   *    dot path argument) and Obj.Child.Grand dot references → literals,
+   *    resolved in ONE left-to-right pass by FINDING the item first */
+  e = prepassReferences(e, listObj, errors);
 
   if (errors.length) return FR_ERROR(errors[0]);
 
